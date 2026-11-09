@@ -4,14 +4,22 @@ const App = {
     currentView: 'view-loading',
     ipAddress: '---.---.---.---',
     isConnectedToRemote: false,
+    hardwareConfig: {
+        sound_enabled: true,
+        beep_tone: 2,
+        beep_duration: 2,
+        led_mode: 'auto',
+        live_preview_enabled: true,
+        roll_boxes_1_to_10: true
+    },
 
     init() {
         this.setStatus("Connecting to Server...");
         this.connect();
         this.setupKeyHandlers();
         this.setupWifiHandlers();
+        this.setupSettingsHandlers();
         this.initActivityMonitor();
-        // this.initBurnInDrift(); // REMOVED as per request
     },
 
     initActivityMonitor() {
@@ -19,21 +27,16 @@ const App = {
         const panels = document.querySelectorAll('.glass-panel');
         let activityTimeout;
 
-        // Define timeouts per state
-        const TIMEOUT_READY = 30000; // 30s
-        const TIMEOUT_DONE = 120000; // 2 mins
+        const TIMEOUT_READY = 30000;
 
-        // Function to dim the screen
         const goDim = () => {
-            // Never dim if we are scanning
-            if (this.currentView === 'view-scanning') return;
+            if (this.currentView === 'view-scanning' || this.currentView === 'view-settings') return;
 
             body.classList.remove('user-active');
             body.classList.remove('show-cursor');
             panels.forEach(p => p.classList.add('dimmed'));
         };
 
-        // Function to wake up
         const goActive = () => {
             body.classList.add('user-active');
             body.classList.add('show-cursor');
@@ -41,29 +44,20 @@ const App = {
 
             clearTimeout(activityTimeout);
 
-            // Determine timeout based on state
-            let delay = TIMEOUT_READY;
-
-            if (this.currentView === 'view-scanning') {
-                return; // No timeout while scanning
+            if (this.currentView === 'view-scanning' || this.currentView === 'view-settings') {
+                return;
             }
 
-            activityTimeout = setTimeout(goDim, delay);
+            activityTimeout = setTimeout(goDim, TIMEOUT_READY);
         };
 
-        // Expose goActive to be called mostly
         this.triggerActivity = goActive;
-
-        // Trigger on load
         goActive();
 
-        // Listen for movement/clicks
         ['mousemove', 'click', 'touchstart', 'keydown'].forEach(evt => {
             document.addEventListener(evt, goActive);
         });
     },
-
-    // Removed initBurnInDrift
 
     setStatus(msg) {
         const el = document.querySelector('#view-loading .status-text');
@@ -72,15 +66,14 @@ const App = {
 
     connect() {
         console.log("Connecting to WebSocket...");
-        // Assuming the server is running on the hostname (localhost) port 8888
         const host = window.location.hostname || 'localhost';
         this.socket = new WebSocket(`ws://${host}:8888/ws`);
 
         this.socket.onopen = () => {
             console.log("WebSocket Connected");
             this.setStatus("Syncing...");
-            // Request System Info immediately
             this.send({ action: "GET_SYSTEM_INFO" });
+            this.send({ action: "GET_CONFIG" });
         };
 
         this.socket.onmessage = (event) => {
@@ -94,7 +87,6 @@ const App = {
 
         this.socket.onclose = () => {
             console.warn("WebSocket Disconnected. Reconnecting...");
-            // Show loading if disconnected
             this.switchView('view-loading');
             setTimeout(() => this.connect(), this.reconnectInterval);
         };
@@ -111,7 +103,6 @@ const App = {
     },
 
     handleMessage(data) {
-        console.log("Received:", data);
         switch (data.type) {
             case 'log':
                 console.log("Server Log:", data.message);
@@ -119,6 +110,13 @@ const App = {
 
             case 'system_info':
                 this.updateSystemInfo(data);
+                break;
+
+            case 'config':
+                if (data.config) {
+                    this.hardwareConfig = Object.assign(this.hardwareConfig, data.config);
+                    this.syncSettingsForm();
+                }
                 break;
 
             case 'wifi_list':
@@ -134,14 +132,40 @@ const App = {
                 break;
 
             case 'status':
-                // Creating status/scanning feedback
                 this.handleStatusUpdate(data);
                 break;
 
+            case 'roll_state':
+                this.handleRollState(data);
+                break;
+
+            case 'preview':
+                this.handlePreviewFrame(data);
+                break;
+
             case 'result':
-                // Scan finished
                 this.switchView('view-ready');
                 break;
+        }
+    },
+
+    handleRollState(data) {
+        const scanInstr = document.getElementById('scan-instruction');
+        if (scanInstr && data.message) {
+            scanInstr.innerText = data.message;
+        }
+    },
+
+    handlePreviewFrame(data) {
+        const previewWrapper = document.getElementById('live-preview-wrapper');
+        const previewImg = document.getElementById('live-preview-img');
+        if (!this.hardwareConfig.live_preview_enabled) {
+            if (previewWrapper) previewWrapper.classList.add('hidden');
+            return;
+        }
+        if (previewWrapper) previewWrapper.classList.remove('hidden');
+        if (previewImg && data.image) {
+            previewImg.src = `data:image/bmp;base64,${data.image}`;
         }
     },
 
@@ -150,11 +174,9 @@ const App = {
         this.ipAddress = data.ip || '---.---.---.---';
         ipDisplay.innerText = this.ipAddress;
 
-        // Generate QR Code if we have a valid IP
         const qrContainer = document.getElementById('qrcode');
         if (qrContainer && this.ipAddress !== '---.---.---.---') {
-            qrContainer.innerHTML = ''; // Clear previous
-
+            qrContainer.innerHTML = '';
             try {
                 if (window.QRCode) {
                     new QRCode(qrContainer, {
@@ -171,13 +193,7 @@ const App = {
             }
         }
 
-        // Logic flow:
-        // 1. If IP is invalid/loopback (no network), go to WiFi Wizard (unless explicitly skipped)
-        // 2. If IP is valid, go to Ready State
-
         if (!data.connected && !this.ipAddress.startsWith("192") && !this.ipAddress.startsWith("10") && !this.ipAddress.startsWith("172")) {
-            // Likely not connected to a proper LAN
-            // But checking 'connected' flag from backend is safer
             if (data.wifi_needed || data.ip === '127.0.0.1' || !data.ip) {
                 this.switchView('view-wifi');
                 this.send({ action: "WIFI_SCAN" });
@@ -185,7 +201,6 @@ const App = {
             }
         }
 
-        // If we have an IP, we are ready
         if (this.currentView === 'view-loading' || this.currentView === 'view-wifi') {
             this.switchView('view-ready');
         }
@@ -200,7 +215,6 @@ const App = {
             statusText.innerText = "Target Connected";
             statusText.style.color = "var(--success-color)";
             dot.classList.add('connected');
-            // We stay in Ready view until a scan starts
         } else {
             statusText.innerText = "Waiting for Client";
             statusText.style.color = "var(--text-secondary)";
@@ -209,52 +223,52 @@ const App = {
     },
 
     handleStatusUpdate(data) {
-        // Data can be a string (legacy/simple) or object
         const msg = (typeof data === 'string') ? data : data.message;
         const param = (typeof data === 'object') ? data.scan_param : null;
 
         const el = document.querySelector('#view-loading .status-text');
         if (el) el.innerText = msg;
 
-        // Also update scanning text if visible
         const scanInstr = document.getElementById('scan-instruction');
         if (scanInstr) scanInstr.innerText = msg;
 
-        // If 'Starting Capture', switch view
         if (msg.includes("Starting Capture")) {
+            const previewImg = document.getElementById('live-preview-img');
+            if (previewImg) previewImg.src = '';
+            const previewWrapper = document.getElementById('live-preview-wrapper');
+            if (previewWrapper) {
+                if (this.hardwareConfig.live_preview_enabled) {
+                    previewWrapper.classList.remove('hidden');
+                } else {
+                    previewWrapper.classList.add('hidden');
+                }
+            }
             this.switchView('view-scanning');
-            // Ensure we update visualizer even if param is present (0 or string)
             if (param !== undefined && param !== null) {
-                console.log("Updating visualizer with param:", param);
                 this.updateScanVisualizer(param);
             } else {
-                console.log("No param for visualizer, showing default.");
-                this.updateScanVisualizer(null); // Force default reset
+                this.updateScanVisualizer(null);
             }
         } else if (msg.includes("Device Initialized")) {
-            // If initialized, go to ready
-            this.switchView('view-ready');
+            if (this.currentView !== 'view-scanning' && this.currentView !== 'view-settings') {
+                this.switchView('view-ready');
+            }
         } else if (msg.includes("Capture Cancelled") || msg.includes("Capture Timed Out")) {
             this.switchView('view-ready');
         }
     },
 
     updateScanVisualizer(param) {
-        console.log("updateScanVisualizer called with:", param);
         const img = document.getElementById('hand-image');
         if (!img) return;
 
         let p = parseInt(param);
 
-        // Handle Map legacy string params or empty inputs
         if (isNaN(p)) {
             if (param === 'R_SLAP') p = 13;
             else if (param === 'L_SLAP') p = 14;
             else if (param === 'THUMBS') p = 15;
-            else {
-                console.warn("Invalid/Missing scan param. Defaulting to Right Index (2).");
-                p = 2;
-            }
+            else p = 2;
         }
 
         let side = 'left';
@@ -265,55 +279,49 @@ const App = {
         }
 
         switch (p) {
-            // Right
-            case 1: finger = 'thumb'; text = "Right Thumb"; break;
-            case 2: finger = 'index'; text = "Right Index"; break;
-            case 3: finger = 'middle'; text = "Right Middle"; break;
-            case 4: finger = 'ring'; text = "Right Ring"; break;
-            case 5: finger = 'little'; text = "Right Little"; break;
+            case 1: finger = 'thumb'; text = "Right Thumb (Roll)"; break;
+            case 2: finger = 'index'; text = "Right Index (Roll)"; break;
+            case 3: finger = 'middle'; text = "Right Middle (Roll)"; break;
+            case 4: finger = 'ring'; text = "Right Ring (Roll)"; break;
+            case 5: finger = 'little'; text = "Right Little (Roll)"; break;
 
-            // Left
-            case 6: finger = 'thumb'; text = "Left Thumb"; break;
-            case 7: finger = 'index'; text = "Left Index"; break;
-            case 8: finger = 'middle'; text = "Left Middle"; break;
-            case 9: finger = 'ring'; text = "Left Ring"; break;
-            case 10: finger = 'little'; text = "Left Little"; break;
+            case 6: finger = 'thumb'; text = "Left Thumb (Roll)"; break;
+            case 7: finger = 'index'; text = "Left Index (Roll)"; break;
+            case 8: finger = 'middle'; text = "Left Middle (Roll)"; break;
+            case 9: finger = 'ring'; text = "Left Ring (Roll)"; break;
+            case 10: finger = 'little'; text = "Left Little (Roll)"; break;
 
-            // Slaps
-            case 13: finger = 'four'; text = "Right 4 Fingers"; break;
-            case 14: finger = 'four'; text = "Left 4 Fingers"; break;
+            case 13: finger = 'four'; text = "Right 4 Fingers (Slap)"; break;
+            case 14: finger = 'four'; text = "Left 4 Fingers (Slap)"; break;
 
-            // Thumbs (15)
             case 15:
                 side = 'right';
                 finger = 'thumb';
-                text = "Both Thumbs";
+                text = "Both Thumbs (Flat)";
                 break;
 
             default:
-                // Fallback catch-all: Right Index
-                console.warn("Unknown scan code:", p, "Defaulting to Right Index.");
                 side = 'right';
                 finger = 'index';
                 text = "Right Index";
         }
 
-        // Construct filename: hand-{side}-{finger}.png
         const filename = `hand-${side}-${finger}.png`;
-        const fullSrc = `/assets/hand/${filename}?v=${new Date().getTime()}_${Math.floor(Math.random() * 10000)}`;
+        const fullSrc = `/assets/hand/${filename}?v=${new Date().getTime()}`;
 
         img.src = fullSrc;
-        img.alt = filename; // Show filename if broken
+        img.alt = filename;
 
-        // Update Title
-        document.querySelector('#view-scanning h1').innerText = "Scanning " + text;
+        const titleEl = document.getElementById('scan-title');
+        if (titleEl) titleEl.innerText = "Scanning " + text;
     },
+
     switchView(viewId) {
         document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
-        document.getElementById(viewId).classList.add('active');
+        const target = document.getElementById(viewId);
+        if (target) target.classList.add('active');
         this.currentView = viewId;
 
-        // Reset power/dimming state when view changes
         if (this.triggerActivity) {
             this.triggerActivity();
         }
@@ -321,17 +329,77 @@ const App = {
 
     setupKeyHandlers() {
         document.addEventListener('keydown', (event) => {
-            // CTRL + ALT + Q
             if (event.ctrlKey && event.altKey && (event.key.toLowerCase() === 'q')) {
-                console.log("Exit Sequence Triggered");
                 this.send({ action: "EXIT_APP" });
-
-                // Also try to close the window
                 try {
                     window.close();
-                } catch (e) { console.log("Cannot close window via JS", e); }
+                } catch (e) {}
             }
         });
+    },
+
+    syncSettingsForm() {
+        const soundEl = document.getElementById('cfg-sound-enabled');
+        const toneEl = document.getElementById('cfg-beep-tone');
+        const durEl = document.getElementById('cfg-beep-duration');
+        const ledEl = document.getElementById('cfg-led-mode');
+        const prevEl = document.getElementById('cfg-live-preview');
+        const rollEl = document.getElementById('cfg-roll-1-10');
+
+        if (soundEl) soundEl.checked = !!this.hardwareConfig.sound_enabled;
+        if (toneEl) toneEl.value = String(this.hardwareConfig.beep_tone ?? 2);
+        if (durEl) durEl.value = String(this.hardwareConfig.beep_duration ?? 2);
+        if (ledEl) ledEl.value = this.hardwareConfig.led_mode || 'auto';
+        if (prevEl) prevEl.checked = !!this.hardwareConfig.live_preview_enabled;
+        if (rollEl) rollEl.checked = !!this.hardwareConfig.roll_boxes_1_to_10;
+    },
+
+    setupSettingsHandlers() {
+        const openBtn = document.getElementById('btn-open-settings');
+        const backBtn = document.getElementById('btn-settings-back');
+        const saveBtn = document.getElementById('btn-settings-save');
+        const testBeepBtn = document.getElementById('btn-test-beep');
+
+        if (openBtn) {
+            openBtn.addEventListener('click', () => {
+                this.syncSettingsForm();
+                this.switchView('view-settings');
+            });
+        }
+
+        if (backBtn) {
+            backBtn.addEventListener('click', () => {
+                this.switchView('view-ready');
+            });
+        }
+
+        if (testBeepBtn) {
+            testBeepBtn.addEventListener('click', () => {
+                const cfg = this.readSettingsForm();
+                this.send({ action: "UPDATE_CONFIG", config: cfg });
+                this.send({ action: "TEST_BEEP" });
+            });
+        }
+
+        if (saveBtn) {
+            saveBtn.addEventListener('click', () => {
+                const cfg = this.readSettingsForm();
+                this.hardwareConfig = Object.assign(this.hardwareConfig, cfg);
+                this.send({ action: "UPDATE_CONFIG", config: cfg });
+                this.switchView('view-ready');
+            });
+        }
+    },
+
+    readSettingsForm() {
+        return {
+            sound_enabled: document.getElementById('cfg-sound-enabled')?.checked ?? true,
+            beep_tone: parseInt(document.getElementById('cfg-beep-tone')?.value ?? "2"),
+            beep_duration: parseInt(document.getElementById('cfg-beep-duration')?.value ?? "2"),
+            led_mode: document.getElementById('cfg-led-mode')?.value ?? "auto",
+            live_preview_enabled: document.getElementById('cfg-live-preview')?.checked ?? true,
+            roll_boxes_1_to_10: document.getElementById('cfg-roll-1-10')?.checked ?? true
+        };
     },
 
     setupWifiHandlers() {
@@ -343,7 +411,6 @@ const App = {
         const btnBack = document.getElementById('btn-wifi-back');
         const btnConnect = document.getElementById('btn-wifi-connect');
 
-        // Keyboard elements
         const keyboardView = document.getElementById('view-keyboard');
         const keyboardInput = document.getElementById('keyboard-input');
         const keyboardCloseBtn = document.getElementById('btn-keyboard-close');
@@ -367,7 +434,6 @@ const App = {
             }
         };
 
-        // Keyboard Logic
         const openKeyboard = (initialValue) => {
             keyboardView.classList.add('active');
             keyboardInput.value = initialValue || "";
@@ -412,7 +478,6 @@ const App = {
             }
         };
 
-        // Bind Keyboard Events
         passwordInput.addEventListener('click', () => {
             openKeyboard(passwordInput.value);
         });
@@ -420,7 +485,6 @@ const App = {
         keyboardCloseBtn.addEventListener('click', () => closeKeyboard(true));
         keyboardCancelBtn.addEventListener('click', () => closeKeyboard(false));
 
-        // Back / Cancel Button
         btnBack.addEventListener('click', () => {
             if (isConnectingMode) {
                 isConnectingMode = false;
@@ -430,7 +494,6 @@ const App = {
             }
         });
 
-        // Connect Button
         btnConnect.addEventListener('click', () => {
             const password = passwordInput.value;
             if (selectedSsid) {
@@ -443,7 +506,6 @@ const App = {
             }
         });
 
-        // Click on Network Item
         listContent.addEventListener('click', (e) => {
             const item = e.target.closest('.wifi-item');
             if (item) {
@@ -456,7 +518,6 @@ const App = {
             }
         });
 
-        // Open Wifi Button (Entry Point)
         const openWifiBtn = document.getElementById('btn-open-wifi');
         if (openWifiBtn) {
             openWifiBtn.addEventListener('click', () => {
@@ -470,7 +531,7 @@ const App = {
 
     renderWifiList(networks) {
         const listContainer = document.getElementById('wifi-list');
-        listContainer.innerHTML = ''; // Clear current
+        listContainer.innerHTML = '';
 
         if (!networks || networks.length === 0) {
             listContainer.innerHTML = '<div style="padding:10px; opacity:0.7">No networks found. Retrying...</div>';
@@ -482,7 +543,6 @@ const App = {
             const div = document.createElement('div');
             div.className = 'wifi-item';
             div.dataset.ssid = net.ssid;
-            // Signal strength icon logic could go here
             div.innerHTML = `
                 <span>${net.ssid}</span>
                 <span style="opacity:0.5">${net.signal || ''}%</span>
@@ -493,13 +553,11 @@ const App = {
 
     handleWifiStatus(data) {
         if (data.connected) {
-            // Connected successfully
-            // Wait for IP update
             setTimeout(() => this.send({ action: "GET_SYSTEM_INFO" }), 2000);
         } else {
             alert("Failed to connect: " + (data.message || "Unknown error"));
             this.switchView('view-wifi');
-            this.send({ action: "WIFI_SCAN" }); // Refresh list
+            this.send({ action: "WIFI_SCAN" });
         }
     }
 };

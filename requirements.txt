@@ -2,3 +2,4 @@ pyusb>=1.2.1
 websockets>=11.0
 asyncio
 aiohttp>=3.8.0
+numpy>=1.24.0
